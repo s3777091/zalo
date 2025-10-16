@@ -8,8 +8,12 @@ from src.agent.middleware.memory_middleware import MemoryMiddleware
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-async def main():
+async def ainput(prompt: str = "") -> str:
+    """Runs input() in a separate thread to avoid blocking the asyncio event loop."""
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(None, input, prompt)
 
+async def main():
     await db_manager.initialize()
     redis_manager.initialize()
 
@@ -24,7 +28,8 @@ async def main():
             redis_manager.close()
         return
 
-    user_id = input("Please enter your User ID to begin (e.g., user_123): ").strip()
+    user_id = await ainput("Please enter your User ID to begin (e.g., user_123): ")
+    user_id = user_id.strip()
     if not user_id:
         print("User ID cannot be empty. Exiting.")
         return
@@ -37,7 +42,7 @@ async def main():
 
     try:
         while True:
-            user_input = input("You: ")
+            user_input = await ainput("You: ")
             if user_input.lower() in ["quit", "exit"]: break
             if not user_input.strip(): continue
 
@@ -68,6 +73,8 @@ async def main():
     except Exception as e:
         logger.error(f"An error occurred during the chat session: {e}", exc_info=True)
     finally:
+        # Give background tasks a moment to finish
+        await asyncio.sleep(1)
         await db_manager.close()
         if redis_manager._client:
             redis_manager.close()
