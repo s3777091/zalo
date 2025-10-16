@@ -116,6 +116,13 @@ class DatabaseManager:
                 return await conn.execute(query)
         return await self._with_retry(_op)
 
+    async def execute_many(self, query: str, params_list: list):
+        async def _op():
+            async with self.pool.acquire() as conn:
+                async with conn.transaction():
+                    return await conn.executemany(query, params_list)
+        return await self._with_retry(_op)
+
     async def get_pool(self) -> Pool:
         if not self.pool:
             raise DatabaseException("Database pool not initialized")

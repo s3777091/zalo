@@ -1,5 +1,6 @@
 import logging
 import asyncio
+import json
 from typing import Any, Optional, Dict
 
 from langchain.agents.middleware import AgentMiddleware, AgentState
@@ -35,13 +36,22 @@ class MemoryMiddleware(AgentMiddleware):
             if not query.strip() and state.get("messages"):
                 query = state["messages"][-1].content
                 
-            recall_results = await search_recall_memories.ainvoke({"query": query, "user_id": user_id})
+            # Tool returns a JSON string, which we need to parse.
+            recalled_memories_json = await search_recall_memories.ainvoke({"query": query, "user_id": user_id})
             
-            if recall_results and isinstance(recall_results, list):
-                logger.info(f"Found {len(recall_results)} recall memories for user '{user_id}'.")
-                state["recall_memories"] = "\n".join(f"- {mem}" for mem in recall_results)
-            else:
-                 state["recall_memories"] = "Chưa có ký ức nào được lưu."
+            try:
+                recalled_data = json.loads(recalled_memories_json)
+                memories = recalled_data.get("memories", [])
+
+                if recalled_data.get("status") == "success" and memories:
+                    logger.info(f"Found {len(memories)} recall memories for user '{user_id}'.")
+                    state["recall_memories"] = "\n".join(f"- {mem}" for mem in memories)
+                else:
+                    state["recall_memories"] = "Chưa có ký ức nào được lưu."
+
+            except (json.JSONDecodeError, TypeError) as e:
+                logger.warning(f"Could not parse recall memories JSON for user '{user_id}': {e}")
+                state["recall_memories"] = "Chưa có ký ức nào được lưu."
 
         except Exception as e:
             logger.warning(f"Could not check or search recall memories for user '{user_id}': {e}", exc_info=True)
@@ -65,4 +75,3 @@ class MemoryMiddleware(AgentMiddleware):
             asyncio.create_task(history_manager.summarize_if_needed())
                 
         return state
-
