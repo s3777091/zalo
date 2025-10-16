@@ -1,6 +1,7 @@
+import asyncio
 import json
 import logging
-import uuid  # <<< THÊM LẠI DÒNG NÀY
+import uuid
 from typing import List
 
 from langchain_core.documents import Document
@@ -13,63 +14,58 @@ from src.database.vector_store import vector_store
 logger = logging.getLogger(__name__)
 
 
+async def _save_and_deduplicate_in_background(user_id: str, memory: str):
+    """Hàm chạy nền để lưu và xử lý trùng lặp ký ức."""
+    try:
+        SIMILARITY_THRESHOLD = 0.95
+        qdrant_filter = Filter(must=[FieldCondition(key="metadata.user_id", match=MatchValue(value=user_id))])
+
+        similar_docs_with_scores = await vector_store.asimilarity_search_with_relevance_scores(
+            query=memory, k=5, filter=qdrant_filter
+        )
+
+        ids_to_delete = [
+            doc.metadata["id"]
+            for doc, score in similar_docs_with_scores
+            if score >= SIMILARITY_THRESHOLD and "id" in doc.metadata
+        ]
+
+        if ids_to_delete:
+            await vector_store.adelete(ids=ids_to_delete)
+            logger.info(f"BACKGROUND: Deleted {len(ids_to_delete)} redundant memories for user '{user_id}'.")
+
+        new_doc_id = str(uuid.uuid4())
+        document = Document(page_content=memory, metadata={"user_id": user_id, "id": new_doc_id})
+        await vector_store.aadd_documents([document])
+
+        if ids_to_delete:
+            logger.info(f"BACKGROUND: Successfully replaced and saved memory for user '{user_id}': '{memory}'")
+        else:
+            logger.info(f"BACKGROUND: Successfully saved new memory for user '{user_id}': '{memory}'")
+
+    except Exception as e:
+        logger.error(f"BACKGROUND: Failed to save memory for user '{user_id}': {e}", exc_info=True)
+
+
 @tool(description="Sử dụng tool này để lưu một thông tin quan trọng, cô đọng về người dùng vào trí nhớ dài hạn. Ví dụ: 'Người dùng tên là An, đang tìm bảo hiểm du lịch.'")
 async def save_recall_memory(memory: str) -> str:
     """
     Lưu một mẩu thông tin (ký ức) vào vector store.
-    Tự động xóa các ký ức cũ bị trùng lặp hoặc quá giống.
+    Hành động này được thực hiện trong nền để không làm chậm cuộc trò chuyện.
     """
     config = ensure_config()
     user_id = config.get("configurable", {}).get("user_id")
-    SIMILARITY_THRESHOLD = 0.95
 
     if not user_id:
         logger.error("Failed to save memory: user_id not found in RunnableConfig.")
         return "Lỗi: Không thể lưu ký ức vì thiếu thông tin người dùng."
 
-    try:
-        # 1. Tìm kiếm các documents tương tự đã có
-        qdrant_filter = Filter(must=[FieldCondition(key="metadata.user_id", match=MatchValue(value=user_id))])
+    # Chạy tác vụ nặng trong nền
+    asyncio.create_task(_save_and_deduplicate_in_background(user_id, memory))
 
-        # Sử dụng search_with_score để lấy điểm tương đồng
-        similar_docs_with_scores = await vector_store.asimilarity_search_with_relevance_scores(
-            query=memory,
-            k=5, # Lấy nhiều hơn để kiểm tra
-            filter=qdrant_filter
-        )
-
-        # 2. Xác định các documents cần xóa
-        ids_to_delete = []
-        for doc, score in similar_docs_with_scores:
-            if score >= SIMILARITY_THRESHOLD:
-                # metadata["id"] là ID của điểm trong Qdrant
-                if "id" in doc.metadata:
-                    ids_to_delete.append(doc.metadata["id"])
-                    logger.info(f"Found highly similar memory for user '{user_id}' with score {score:.4f}. Marking for deletion: ID {doc.metadata['id']}")
-
-        # 3. Xóa các documents cũ nếu có
-        if ids_to_delete:
-            await vector_store.adelete(ids=ids_to_delete)
-            logger.info(f"Deleted {len(ids_to_delete)} redundant memories for user '{user_id}'.")
-
-        # 4. Thêm document mới
-        new_doc_id = str(uuid.uuid4())
-        document = Document(
-            page_content=memory,
-            metadata={"user_id": user_id, "id": new_doc_id} # Gán ID để có thể xóa sau này
-        )
-        await vector_store.aadd_documents([document])
-
-        if ids_to_delete:
-            logger.info(f"Successfully replaced and saved memory for user '{user_id}': '{memory}'")
-            return f"Đã cập nhật và lưu thành công ký ức: '{memory}'"
-        else:
-            logger.info(f"Successfully saved new memory for user '{user_id}': '{memory}'")
-            return f"Đã lưu thành công ký ức mới: '{memory}'"
-
-    except Exception as e:
-        logger.error(f"Failed to save memory for user '{user_id}': {e}", exc_info=True)
-        return "Lỗi: Đã có sự cố xảy ra khi cố gắng lưu ký ức."
+    # Trả về ngay lập tức để không chặn luồng chính
+    logger.info(f"Queued memory for background saving for user '{user_id}': '{memory}'")
+    return f"Đã tiếp nhận và sẽ ghi nhớ thông tin này: '{memory}'"
 
 
 @tool(description="Sử dụng tool này để tìm trong trí nhớ các thông tin liên quan đến chủ đề hiện tại.")
